@@ -1,0 +1,27 @@
+=================================================================
+  AUTOENCODER -- EVALUATION REPORT
+=================================================================
+
+Autoencoder  |  normal-only training  |  threshold 0.063377
+
+  Summary Metrics:
+    Accuracy  : 0.7324  (73.24%)
+    Precision : 0.8871
+    Recall    : 0.5889
+    F1-Score  : 0.7078
+
+  Confusion Matrix (TN FP / FN TP):
+    TN=33,603  FP=3,397
+    FN=18,638  TP=26,694
+
+  Full Classification Report:
+              precision    recall  f1-score   support
+
+      Normal       0.64      0.91      0.75     37000
+      Attack       0.89      0.59      0.71     45332
+
+    accuracy                           0.73     82332
+   macro avg       0.77      0.75      0.73     82332
+weighted avg       0.78      0.73      0.73     82332
+
+=================================================================

@@ -1,0 +1,27 @@
+=================================================================
+  HYBRID -- EVALUATION REPORT
+=================================================================
+
+Hybrid ANN+AE  |  OR logic  |  ANN thr=0.4  AE thr=0.040773
+
+  Summary Metrics:
+    Accuracy  : 0.7665  (76.65%)
+    Precision : 0.7022
+    Recall    : 0.9998
+    F1-Score  : 0.8250
+
+  Confusion Matrix (TN FP / FN TP):
+    TN=17,783  FP=19,217
+    FN=10  TP=45,322
+
+  Full Classification Report:
+              precision    recall  f1-score   support
+
+      Normal       1.00      0.48      0.65     37000
+      Attack       0.70      1.00      0.83     45332
+
+    accuracy                           0.77     82332
+   macro avg       0.85      0.74      0.74     82332
+weighted avg       0.84      0.77      0.75     82332
+
+=================================================================
