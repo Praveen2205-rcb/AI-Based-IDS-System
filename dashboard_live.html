@@ -251,7 +251,7 @@ function showDetail(a){
     '<div class="kv"><span class="k">Destination</span><span class="v">'+a.dst+':'+a.dp+'</span></div></div>';
 }
 document.getElementById('bStart').addEventListener('click',function(){
-  socket.emit('start_monitor',{simulate:true,iface:'5'});
+  socket.emit('start_monitor',{iface:'5'});
   document.getElementById('bStart').style.display='none';
   document.getElementById('bStop').style.display='';
   tlog('in','Sending start command to Python backend...');

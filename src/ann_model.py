@@ -72,7 +72,7 @@ def load_ann(path=None):
     return load_model(path)
 
 
-def predict_ann(model, X, threshold=0.5):
+def predict_ann(model, X, threshold=0.70):
     y_prob = model.predict(X, verbose=0).ravel()
     y_pred = (y_prob >= threshold).astype(int)
     return y_pred, y_prob

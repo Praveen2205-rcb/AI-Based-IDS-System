@@ -82,10 +82,10 @@ def run_training():
                                          save=CONFIG["SAVE"])
 
     banner("STEP 6 — Evaluate")
-    ypa, proba = predict_ann(ann, X_te)
+    ypa, proba = predict_ann(ann, X_te, threshold=0.70)
     am = compute_metrics(y_te, ypa)
     save_report("ann", am, y_te, ypa,
-                extra="ANN  |  SMOTE-balanced  |  Threshold 0.5")
+                extra="ANN  |  SMOTE-balanced  |  Threshold 0.70 (Tuned)")
 
     ype, errs = predict_autoencoder(ae, X_te, ae_thr)
     em = compute_metrics(y_te, ype)

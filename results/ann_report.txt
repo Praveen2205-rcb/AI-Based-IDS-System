@@ -2,26 +2,26 @@
   ANN -- EVALUATION REPORT
 =================================================================
 
-ANN  |  SMOTE-balanced  |  Threshold 0.5
+ANN  |  SMOTE-balanced  |  Threshold 0.70 (Tuned)
 
   Summary Metrics:
-    Accuracy  : 0.8929  (89.29%)
-    Precision : 0.8796
-    Recall    : 0.9333
-    F1-Score  : 0.9056
+    Accuracy  : 0.9051  (90.51%)
+    Precision : 0.9294
+    Recall    : 0.8955
+    F1-Score  : 0.9122
 
   Confusion Matrix (TN FP / FN TP):
-    TN=31,208  FP=5,792
-    FN=3,025  TP=42,307
+    TN=33,918  FP=3,082
+    FN=4,735  TP=40,597
 
   Full Classification Report:
               precision    recall  f1-score   support
 
-      Normal       0.91      0.84      0.88     37000
-      Attack       0.88      0.93      0.91     45332
+      Normal       0.88      0.92      0.90     37000
+      Attack       0.93      0.90      0.91     45332
 
-    accuracy                           0.89     82332
-   macro avg       0.90      0.89      0.89     82332
-weighted avg       0.89      0.89      0.89     82332
+    accuracy                           0.91     82332
+   macro avg       0.90      0.91      0.90     82332
+weighted avg       0.91      0.91      0.91     82332
 
 =================================================================

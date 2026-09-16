@@ -53,7 +53,8 @@ def on_disconnect(): print("[server] Browser disconnected.")
 @socketio.on("start_monitor")
 def on_start(data):
     if state["running"]: return
-    simulate=data.get("simulate",True); iface=data.get("iface","5")
+    simulate=data.get("simulate",state["simulate"]) if "simulate" in data else state["simulate"]
+    iface=data.get("iface",state["iface"])
     state.update(running=True,simulate=simulate,iface=iface)
     state["stop_evt"].clear()
     threading.Thread(target=_loop,args=(simulate,iface),daemon=True).start()
