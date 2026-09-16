@@ -1,0 +1,506 @@
+[1mdiff --git a/src/suicata_monitor.py b/src/suicata_monitor.py[m
+[1mdeleted file mode 100644[m
+[1mindex 316724b..0000000[m
+[1m--- a/src/suicata_monitor.py[m
+[1m+++ /dev/null[m
+[36m@@ -1,253 +0,0 @@[m
+[31m-# """[m
+[31m-# suricata_monitor.py[m
+[31m-# ===================[m
+[31m-# Real-time Suricata alert monitor — rule-based detection path.[m
+[31m-[m
+[31m-# Reads Suricata eve.json DIRECTLY from WSL via:[m
+[31m-#     \\wsl$\<distro>\var\log\suricata\eve.json[m
+[31m-[m
+[31m-# For every new alert event:[m
+[31m-#     1. Parse Suricata alert fields (signature, category, proto, ports)[m
+[31m-#     2. Build ANN feature vector from alert metadata[m
+[31m-#     3. Run ANN classifier → attack probability[m
+[31m-#     4. Push ("suricata", alert, result) onto shared results queue[m
+[31m-[m
+[31m-# Runs as a background thread alongside zeek_monitor.py.[m
+[31m-# Final verdict merged by monitor_manager.py.[m
+[31m-[m
+[31m-# WSL SETUP (run these in WSL before starting):[m
+[31m-#     sudo suricata -i eth0[m
+[31m-[m
+[31m-# STANDALONE USAGE (Windows VS Code terminal):[m
+[31m-#     python src/suricata_monitor.py[m
+[31m-[m
+[31m-# CALLED FROM monitor_manager.py:[m
+[31m-#     from src.suricata_monitor import _tail_eve[m
+[31m-# """[m
+[31m-[m
+[31m-# import os[m
+[31m-# import sys[m
+[31m-# import json[m
+[31m-# import time[m
+[31m-# import queue[m
+[31m-# import threading[m
+[31m-# import subprocess[m
+[31m-[m
+[31m-# # ── WSL path config ───────────────────────────────────────────────────────────[m
+[31m-# WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")[m
+[31m-# _WSL_ROOT  = "\\\\wsl$\\{}".format(WSL_DISTRO)[m
+[31m-[m
+[31m-# SURICATA_LOG = os.environ.get([m
+[31m-#     "WSL_SURICATA_LOG",[m
+[31m-#     os.path.join(_WSL_ROOT, "var", "log", "suricata", "eve.json")[m
+[31m-# )[m
+[31m-[m
+[31m-# POLL_INTERVAL = 0.5[m
+[31m-[m
+[31m-[m
+[31m-# # ── WSL user auto-detection ───────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def detect_wsl_user():[m
+[31m-#     user = os.environ.get("WSL_USER", "")[m
+[31m-#     if user:[m
+[31m-#         return user[m
+[31m-#     try:[m
+[31m-#         r = subprocess.run([m
+[31m-#             ["wsl", "-d", WSL_DISTRO, "--", "whoami"],[m
+[31m-#             capture_output=True, text=True, timeout=5[m
+[31m-#         )[m
+[31m-#         return r.stdout.strip() or "user"[m
+[31m-#     except Exception:[m
+[31m-#         return "user"[m
+[31m-[m
+[31m-[m
+[31m-# # ── Startup check ─────────────────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def check_wsl_accessible():[m
+[31m-#     wsl_root = "\\\\wsl$\\{}".format(WSL_DISTRO)[m
+[31m-#     if not os.path.exists(wsl_root):[m
+[31m-#         print("[suricata] ERROR: Cannot reach WSL at {}".format(wsl_root))[m
+[31m-#         print("           Make sure WSL is running:  wsl -d {}".format(WSL_DISTRO))[m
+[31m-#         print("           Run `wsl -l` in CMD to list distros.")[m
+[31m-#         print("           Or set:  set WSL_DISTRO=<your-distro-name>")[m
+[31m-#         return False[m
+[31m-#     if not os.path.exists(SURICATA_LOG):[m
+[31m-#         print("[suricata] ERROR: eve.json not found: {}".format(SURICATA_LOG))[m
+[31m-#         print("           Start Suricata in WSL:  sudo suricata -i eth0")[m
+[31m-#         print("           Or set:  set WSL_SURICATA_LOG=<path>")[m
+[31m-#         return False[m
+[31m-#     print("[suricata] WSL distro : {}".format(WSL_DISTRO))[m
+[31m-#     print("[suricata] Log path   : {}".format(SURICATA_LOG))[m
+[31m-#     return True[m
+[31m-[m
+[31m-[m
+[31m-# # ── eve.json line parser ───────────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def _parse_eve_alert(raw_line):[m
+[31m-#     """[m
+[31m-#     Parse one JSON line from Suricata eve.json.[m
+[31m-#     Returns normalised alert dict or None if not an alert event.[m
+[31m-[m
+[31m-#     Suricata eve.json alert fields used:[m
+[31m-#         timestamp[m
+[31m-#         alert.signature   → msg[m
+[31m-#         alert.category    → category[m
+[31m-#         alert.severity    → priority  (1=high 2=medium 3=low)[m
+[31m-#         proto             → proto[m
+[31m-#         src_ip, src_port[m
+[31m-#         dest_ip, dest_port[m
+[31m-#     """[m
+[31m-#     try:[m
+[31m-#         ev = json.loads(raw_line)[m
+[31m-#     except json.JSONDecodeError:[m
+[31m-#         return None[m
+[31m-[m
+[31m-#     if ev.get("event_type") != "alert":[m
+[31m-#         return None[m
+[31m-[m
+[31m-#     ab = ev.get("alert", {})[m
+[31m-#     return {[m
+[31m-#         "timestamp" : ev.get("timestamp", ""),[m
+[31m-#         "msg"       : ab.get("signature", "Suricata Alert"),[m
+[31m-#         "category"  : ab.get("category",  ""),[m
+[31m-#         "priority"  : int(ab.get("severity", 3)),[m
+[31m-#         "proto"     : ev.get("proto", "TCP").upper(),[m
+[31m-#         "src_ip"    : ev.get("src_ip",    ""),[m
+[31m-#         "src_port"  : int(ev.get("src_port",  0)),[m
+[31m-#         "dst_ip"    : ev.get("dest_ip",   ""),[m
+[31m-#         "dst_port"  : int(ev.get("dest_port", 0)),[m
+[31m-#         "source"    : "Suricata",[m
+[31m-#     }[m
+[31m-[m
+[31m-[m
+[31m-# # ── eve.json tailer ───────────────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def _tail_eve(predictor, result_queue, stop_event):[m
+[31m-#     """[m
+[31m-#     Tail Suricata eve.json from WSL path.[m
+[31m-#     For each new alert line:[m
+[31m-#         1. Parse alert fields[m
+[31m-#         2. Run ANN classifier (Suricata-driven feature vector)[m
+[31m-#         3. Push ("suricata", alert, result) onto result_queue[m
+[31m-[m
+[31m-#     Args:[m
+[31m-#         predictor    : loaded AIPredictor instance[m
+[31m-#         result_queue : queue.Queue shared with zeek_monitor[m
+[31m-#         stop_event   : threading.Event — set to stop the loop[m
+[31m-#     """[m
+[31m-#     print("[suricata] Tailing: {}".format(SURICATA_LOG))[m
+[31m-[m
+[31m-#     try:[m
+[31m-#         fh  = open(SURICATA_LOG, "r", errors="replace")[m
+[31m-#         pos = fh.seek(0, 2)   # seek to end — only new alerts[m
+[31m-#     except Exception as e:[m
+[31m-#         print("[suricata] Cannot open eve.json: {}".format(e))[m
+[31m-#         return[m
+[31m-[m
+[31m-#     while not stop_event.is_set():[m
+[31m-#         line = fh.readline()[m
+[31m-[m
+[31m-#         if not line:[m
+[31m-#             # Log rotation check[m
+[31m-#             try:[m
+[31m-#                 if os.path.getsize(SURICATA_LOG) < pos:[m
+[31m-#                     fh.close()[m
+[31m-#                     fh  = open(SURICATA_LOG, "r", errors="replace")[m
+[31m-#                     pos = 0[m
+[31m-#                     print("[suricata] eve.json rotated — reopened.")[m
+[31m-#             except OSError:[m
+[31m-#                 pass[m
+[31m-#             time.sleep(POLL_INTERVAL)[m
+[31m-#             continue[m
+[31m-[m
+[31m-#         pos   = fh.tell()[m
+[31m-#         alert = _parse_eve_alert(line.strip())[m
+[31m-#         if alert is None:[m
+[31m-#             continue[m
+[31m-[m
+[31m-#         # Run ANN only (Suricata-driven features)[m
+[31m-#         try:[m
+[31m-#             import numpy as np[m
+[31m-#             ann_vec  = predictor._build_ann_vector(alert)[m
+[31m-#             ann_prob = float(predictor._ann.predict(ann_vec, verbose=0).ravel()[0])[m
+[31m-#             ann_label = 1 if ann_prob >= 0.5 else 0[m
+[31m-[m
+[31m-#             result = {[m
+[31m-#                 "ann_label" : ann_label,[m
+[31m-#                 "ann_conf"  : round(ann_prob, 4),[m
+[31m-#                 "ae_label"  : None,[m
+[31m-#                 "ae_mse"    : None,[m
+[31m-#                 "threshold" : round(predictor._threshold, 6),[m
+[31m-#                 "combined"  : ann_label,[m
+[31m-#                 "source"    : "ANN(Suricata)",[m
+[31m-#             }[m
+[31m-#             result_queue.put(("suricata", alert, result))[m
+[31m-[m
+[31m-#         except Exception as ex:[m
+[31m-#             print("[suricata] ANN inference error: {}".format(ex))[m
+[31m-[m
+[31m-#     fh.close()[m
+[31m-#     print("[suricata] Monitor stopped.")[m
+[31m-[m
+[31m-[m
+[31m-# # ── Standalone display helper ─────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def _print_standalone(alert, result):[m
+[31m-#     verdict = "ATTACK" if result["combined"] else "NORMAL"[m
+[31m-#     print("=" * 62)[m
+[31m-#     print("  Time     : {}".format(alert.get("timestamp", "")))[m
+[31m-#     print("  Alert    : {}".format(alert.get("msg", "")))[m
+[31m-#     print("  Category : {}".format(alert.get("category", "")))[m
+[31m-#     print("  Proto    : {}  {}:{} → {}:{}".format([m
+[31m-#         alert.get("proto",""),[m
+[31m-#         alert.get("src_ip",""),  alert.get("src_port",""),[m
+[31m-#         alert.get("dst_ip",""),  alert.get("dst_port",""),[m
+[31m-#     ))[m
+[31m-#     print("  ANN      : {} (conf={:.2%})".format([m
+[31m-#         "ATTACK" if result["ann_label"] else "NORMAL",[m
+[31m-#         result["ann_conf"],[m
+[31m-#     ))[m
+[31m-#     print("  ► VERDICT: {}".format(verdict))[m
+[31m-#     print("=" * 62)[m
+[31m-[m
+[31m-[m
+[31m-# # ── Standalone entry point ────────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def start_monitor(predictor=None):[m
+[31m-#     """Run suricata_monitor standalone (without zeek_monitor)."""[m
+[31m-#     if not check_wsl_accessible():[m
+[31m-#         sys.exit(1)[m
+[31m-[m
+[31m-#     if predictor is None:[m
+[31m-#         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))[m
+[31m-#         from src.ai_predictor import AIPredictor[m
+[31m-#         predictor = AIPredictor()[m
+[31m-#         predictor.load()[m
+[31m-[m
+[31m-#     rq         = queue.Queue()[m
+[31m-#     stop_event = threading.Event()[m
+[31m-[m
+[31m-#     print("[suricata] Standalone mode — Ctrl+C to stop\n")[m
+[31m-[m
+[31m-#     t = threading.Thread([m
+[31m-#         target=_tail_eve,[m
+[31m-#         args=(predictor, rq, stop_event),[m
+[31m-#         daemon=True[m
+[31m-#     )[m
+[31m-#     t.start()[m
+[31m-[m
+[31m-#     try:[m
+[31m-#         while True:[m
+[31m-#             try:[m
+[31m-#                 _, alert, result = rq.get(timeout=1.0)[m
+[31m-#                 _print_standalone(alert, result)[m
+[31m-#             except queue.Empty:[m
+[31m-#                 continue[m
+[31m-#     except KeyboardInterrupt:[m
+[31m-#         stop_event.set()[m
+[31m-#         t.join(timeout=3)[m
+[31m-#         print("\n[suricata] Stopped.")[m
+[31m-[m
+[31m-[m
+[31m-# if __name__ == "__main__":[m
+[31m-#     start_monitor()[m
+\ No newline at end of file[m
+[1mdiff --git a/src/zeek_monitor.py b/src/zeek_monitor.py[m
+[1mdeleted file mode 100644[m
+[1mindex 6b47062..0000000[m
+[1m--- a/src/zeek_monitor.py[m
+[1m+++ /dev/null[m
+[36m@@ -1,490 +0,0 @@[m
+[31m-# """[m
+[31m-# zeek_monitor.py[m
+[31m-# ===============[m
+[31m-# Real-time Zeek log monitor — anomaly-based detection path.[m
+[31m-[m
+[31m-# Reads three Zeek logs directly from WSL:[m
+[31m-#     conn.log   — maps to UNSW-NB15 numeric features[m
+[31m-#     dns.log    — enriches service field[m
+[31m-#     http.log   — enriches trans_depth, response_body_len, ct_flw_http_mthd[m
+[31m-[m
+[31m-# UNSW-NB15 feature columns (exact match to training data):[m
+[31m-#     dur, proto, service, state,[m
+[31m-#     spkts, dpkts, sbytes, dbytes, rate,[m
+[31m-#     sttl, dttl, sload, dload, sloss, dloss,[m
+[31m-#     sinpkt, dinpkt, sjit, djit,[m
+[31m-#     swin, stcpb, dtcpb, dwin, tcprtt, synack, ackdat,[m
+[31m-#     smean, dmean, trans_depth, response_body_len,[m
+[31m-#     ct_srv_src, ct_state_ttl, ct_dst_ltm,[m
+[31m-#     ct_src_dport_ltm, ct_dst_sport_ltm, ct_dst_src_ltm,[m
+[31m-#     is_ftp_login, ct_ftp_cmd, ct_flw_http_mthd,[m
+[31m-#     ct_src_ltm, ct_srv_dst, is_sm_ips_ports[m
+[31m-[m
+[31m-# Zeek conn.log → UNSW-NB15 mapping:[m
+[31m-#     duration             → dur[m
+[31m-#     proto                → proto[m
+[31m-#     service              → service  (Zeek field, or port-based lookup)[m
+[31m-#     conn_state           → state    (mapped via _STATE_MAP)[m
+[31m-#     orig_pkts            → spkts[m
+[31m-#     resp_pkts            → dpkts[m
+[31m-#     orig_bytes           → sbytes[m
+[31m-#     resp_bytes           → dbytes[m
+[31m-#     (orig+resp pkts)/dur → rate[m
+[31m-#     orig_ttl             → sttl[m
+[31m-#     resp_ttl             → dttl[m
+[31m-#     orig_bytes/dur       → sload[m
+[31m-#     resp_bytes/dur       → dload[m
+[31m-#     orig_ip_bytes-orig_bytes → sloss[m
+[31m-#     resp_ip_bytes-resp_bytes → dloss[m
+[31m-#     dur/orig_pkts        → sinpkt[m
+[31m-#     dur/resp_pkts        → dinpkt[m
+[31m-#     orig_jitter_inpkt    → sjit[m
+[31m-#     resp_jitter_inpkt    → djit[m
+[31m-#     orig_wnd_scale       → swin[m
+[31m-#     orig_base_seq        → stcpb[m
+[31m-#     resp_base_seq        → dtcpb[m
+[31m-#     resp_wnd_scale       → dwin[m
+[31m-#     rtt                  → tcprtt[m
+[31m-#     syn_ack_rtt          → synack[m
+[31m-#     ack_dat_rtt          → ackdat[m
+[31m-#     orig_bytes/orig_pkts → smean[m
+[31m-#     resp_bytes/resp_pkts → dmean[m
+[31m-#     http.log entries     → trans_depth, response_body_len, ct_flw_http_mthd[m
+[31m-# """[m
+[31m-[m
+[31m-# import os[m
+[31m-# import time[m
+[31m-# import queue[m
+[31m-# import threading[m
+[31m-# import numpy as np[m
+[31m-[m
+[31m-# # ── WSL path config ───────────────────────────────────────────────────────────[m
+[31m-# WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")[m
+[31m-# _WSL_ROOT  = "\\\\wsl$\\{}".format(WSL_DISTRO)[m
+[31m-[m
+[31m-# def _wsl(rel):[m
+[31m-#     return os.path.join(_WSL_ROOT, rel)[m
+[31m-[m
+[31m-# def wsl_log_paths(wsl_user):[m
+[31m-#     home = "home\\{}".format(wsl_user)[m
+[31m-#     return {[m
+[31m-#         "conn" : os.environ.get("WSL_ZEEK_CONN",  _wsl("{}\\conn.log".format(home))),[m
+[31m-#         "dns"  : os.environ.get("WSL_ZEEK_DNS",   _wsl("{}\\dns.log".format(home))),[m
+[31m-#         "http" : os.environ.get("WSL_ZEEK_HTTP",  _wsl("{}\\http.log".format(home))),[m
+[31m-#     }[m
+[31m-[m
+[31m-# POLL_INTERVAL    = 0.5[m
+[31m-# DNS_REFRESH_SEC  = 20[m
+[31m-# HTTP_REFRESH_SEC = 20[m
+[31m-[m
+[31m-# # ── Zeek conn_state → UNSW-NB15 state ────────────────────────────────────────[m
+[31m-# _STATE_MAP = {[m
+[31m-#     "SF"  : "FIN", "S1": "CON", "S0": "INT", "REJ": "RST",[m
+[31m-#     "RSTO": "RST", "RSTR":"RST","SH" : "INT", "SHR": "INT",[m
+[31m-#     "OTH" : "CON", "S2" : "CON","S3" : "CON",[m
+[31m-# }[m
+[31m-[m
+[31m-# # ── Port → service ────────────────────────────────────────────────────────────[m
+[31m-# _PORT_SVC = {[m
+[31m-#     21:"ftp", 20:"ftp-data", 22:"ssh", 25:"smtp", 53:"dns",[m
+[31m-#     80:"http", 110:"pop3", 443:"ssl", 6667:"irc", 161:"snmp", 67:"dhcp",[m
+[31m-# }[m
+[31m-[m
+[31m-# # ── Normalisation (UNSW-NB15 approximate mean/scale) ─────────────────────────[m
+[31m-# _NORM = {[m
+[31m-#     "dur"              : (0.5,     5.0),[m
+[31m-#     "spkts"            : (5.0,    20.0),[m
+[31m-#     "dpkts"            : (3.0,    15.0),[m
+[31m-#     "sbytes"           : (500.0, 5000.0),[m
+[31m-#     "dbytes"           : (300.0, 3000.0),[m
+[31m-#     "rate"             : (8.0,    30.0),[m
+[31m-#     "sttl"             : (64.0,   30.0),[m
+[31m-#     "dttl"             : (64.0,   30.0),[m
+[31m-#     "sload"            : (0.0,  5000.0),[m
+[31m-#     "dload"            : (0.0,  3000.0),[m
+[31m-#     "sloss"            : (0.0,    10.0),[m
+[31m-#     "dloss"            : (0.0,    10.0),[m
+[31m-#     "sinpkt"           : (0.0,    50.0),[m
+[31m-#     "dinpkt"           : (0.0,    50.0),[m
+[31m-#     "sjit"             : (0.0,   100.0),[m
+[31m-#     "djit"             : (0.0,   100.0),[m
+[31m-#     "swin"             : (128.0, 128.0),[m
+[31m-#     "dwin"             : (128.0, 128.0),[m
+[31m-#     "stcpb"            : (0.0,    1e9),[m
+[31m-#     "dtcpb"            : (0.0,    1e9),[m
+[31m-#     "tcprtt"           : (0.0,     1.0),[m
+[31m-#     "synack"           : (0.0,     1.0),[m
+[31m-#     "ackdat"           : (0.0,     1.0),[m
+[31m-#     "smean"            : (100.0, 500.0),[m
+[31m-#     "dmean"            : (100.0, 500.0),[m
+[31m-#     "trans_depth"      : (0.0,    10.0),[m
+[31m-#     "response_body_len": (0.0, 10000.0),[m
+[31m-#     "ct_srv_src"       : (1.0,     5.0),[m
+[31m-#     "ct_state_ttl"     : (1.0,     5.0),[m
+[31m-#     "ct_dst_ltm"       : (1.0,     5.0),[m
+[31m-#     "ct_src_dport_ltm" : (1.0,     5.0),[m
+[31m-#     "ct_dst_sport_ltm" : (1.0,     5.0),[m
+[31m-#     "ct_dst_src_ltm"   : (1.0,     5.0),[m
+[31m-#     "ct_src_ltm"       : (1.0,     5.0),[m
+[31m-#     "ct_srv_dst"       : (1.0,     5.0),[m
+[31m-# }[m
+[31m-[m
+[31m-# def _z(val, mean, scale):[m
+[31m-#     if scale == 0: return 0.0[m
+[31m-#     return float(np.clip((float(val) - mean) / scale, -3.0, 3.0))[m
+[31m-[m
+[31m-# def _f(row, key, default=0.0):[m
+[31m-#     v = row.get(key, "-")[m
+[31m-#     try:    return float(v) if v not in ("-","","(empty)") else default[m
+[31m-#     except: return default[m
+[31m-[m
+[31m-# # ── Zeek log parsers ──────────────────────────────────────────────────────────[m
+[31m-[m
+[31m-# def _parse_zeek_tsv(path):[m
+[31m-#     rows, fields = [], [][m
+[31m-#     if not os.path.exists(path): return rows[m
+[31m-#     try:[m
+[31m-#         with open(path, "r", errors="replace") as f:[m
+[31m-#             for line in f:[m
+[31m-#                 line = line.strip()[m
+[31m-#                 if line.startswith("#fields"):[m
+[31m-#                     fields = line.split("\t")[1:]; continue[m
+[31m-#                 if line.startswith("#") or not fields: continue[m
+[31m-#                 parts = line.split("\t")[m
+[31m-#                 if len(parts) >= len(fields):[m
+[31m-#                     rows.append(dict(zip(fields, parts)))[m
+[31m-#     except Exception as e:[m
+[31m-#         print("[zeek] Parse error {}: {}".format(path, e))[m
+[31m-#     return rows[m
+[31m-[m
+[31m-# def _build_dns_index(path):[m
+[31m-#     index = {}[m
+[31m-#     for row in _parse_zeek_tsv(path):[m
+[31m-#         src = row.get("id.orig_h","")[m
+[31m-#         if src:[m
+[31m-#             index.setdefault(src,[]).append({[m
+[31m-#                 "query": row.get("query",""),[m
+[31m-#                 "qtype": row.get("qtype_name",""),[m
+[31m-#                 "rcode": row.get("rcode_name",""),[m
+[31m-#             })[m
+[31m-#     return index[m
+[31m-[m
+[31m-# def _build_http_index(path):[m
+[31m-#     index = {}[m
+[31m-#     for row in _parse_zeek_tsv(path):[m
+[31m-#         key = (row.get("id.orig_h",""), row.get("id.resp_h",""), row.get("id.resp_p","80"))[m
+[31m-#         index.setdefault(key,[]).append({[m
+[31m-#             "method"  : row.get("method",""),[m
+[31m-#             "uri"     : row.get("uri",""),[m
+[31m-#             "status"  : row.get("status_code",""),[m
+[31m-#             "body_len": _f(row,"resp_body_len"),[m
+[31m-#         })[m
+[31m-#     return index[m
+[31m-[m
+[31m-# # ── conn.log row → exact UNSW-NB15 feature dict ───────────────────────────────[m
+[31m-[m
+[31m-# def _conn_to_features(row, dns_index, http_index, conn_counts):[m
+[31m-#     """[m
+[31m-#     Map one Zeek conn.log row to the exact UNSW-NB15 feature set.[m
+[31m-#     All numeric values are z-score normalised using _NORM constants.[m
+[31m-#     """[m
+[31m-#     src_ip   = row.get("id.orig_h","")[m
+[31m-#     dst_ip   = row.get("id.resp_h","")[m
+[31m-#     src_port = int(_f(row,"id.orig_p"))[m
+[31m-#     dst_port = int(_f(row,"id.resp_p"))[m
+[31m-#     proto    = row.get("proto","tcp").lower()[m
+[31m-#     zeek_svc = row.get("service","-").lower().strip()[m
+[31m-[m
+[31m-#     # ── Numeric fields ────────────────────────────────────────────────────────[m
+[31m-#     dur    = _f(row,"duration")[m
+[31m-#     sbytes = _f(row,"orig_bytes")[m
+[31m-#     dbytes = _f(row,"resp_bytes")[m
+[31m-#     spkts  = _f(row,"orig_pkts")[m
+[31m-#     dpkts  = _f(row,"resp_pkts")[m
+[31m-[m
+[31m-#     orig_ip = _f(row,"orig_ip_bytes", sbytes)[m
+[31m-#     resp_ip = _f(row,"resp_ip_bytes", dbytes)[m
+[31m-#     sloss   = max(orig_ip - sbytes, 0.0)[m
+[31m-#     dloss   = max(resp_ip - dbytes, 0.0)[m
+[31m-[m
+[31m-#     rate   = (spkts + dpkts) / max(dur, 1e-9)[m
+[31m-#     sload  = sbytes / max(dur, 1e-9)[m
+[31m-#     dload  = dbytes / max(dur, 1e-9)[m
+[31m-#     sinpkt = dur    / max(spkts, 1e-9)[m
+[31m-#     dinpkt = dur    / max(dpkts, 1e-9)[m
+[31m-#     sjit   = _f(row,"orig_jitter_inpkt")[m
+[31m-#     djit   = _f(row,"resp_jitter_inpkt")[m
+[31m-#     swin   = _f(row,"orig_wnd_scale",0)  if proto=="tcp" else 0.0[m
+[31m-#     dwin   = _f(row,"resp_wnd_scale",0)  if proto=="tcp" else 0.0[m
+[31m-#     stcpb  = _f(row,"orig_base_seq",0)[m
+[31m-#     dtcpb  = _f(row,"resp_base_seq",0)[m
+[31m-#     tcprtt = _f(row,"rtt")[m
+[31m-#     synack = _f(row,"syn_ack_rtt")[m
+[31m-#     ackdat = _f(row,"ack_dat_rtt")[m
+[31m-#     smean  = sbytes / max(spkts, 1.0)[m
+[31m-#     dmean  = dbytes / max(dpkts, 1.0)[m
+[31m-#     sttl   = _f(row,"orig_ttl", 64)[m
+[31m-#     dttl   = _f(row,"resp_ttl", 64)[m
+[31m-[m
+[31m-#     # ── State & service ───────────────────────────────────────────────────────[m
+[31m-#     state   = _STATE_MAP.get(row.get("conn_state","OTH"), "CON")[m
+[31m-#     service = zeek_svc if zeek_svc and zeek_svc != "-" else _PORT_SVC.get(dst_port,"-")[m
+[31m-[m
+[31m-#     # ── HTTP enrichment ───────────────────────────────────────────────────────[m
+[31m-#     http_entries      = http_index.get((src_ip, dst_ip, str(dst_port)), [])[m
+[31m-#     trans_depth       = float(len(http_entries))[m
+[31m-#     response_body_len = sum(e["body_len"] for e in http_entries)[m
+[31m-#     ct_flw_http_mthd  = float(len([e for e in http_entries[m
+[31m-#                                    if e["method"] in ("GET","POST","PUT","DELETE")]))[m
+[31m-[m
+[31m-#     # ── FTP flags ────────────────────────────────────────────────────────�
